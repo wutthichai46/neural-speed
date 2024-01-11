@@ -240,7 +240,7 @@ public:
             this->matC_ld = args.matC_ld;
             this->scale_base = args.scale_base;
             this->scale_ld = args.scale_ld;
-            this->zero_pt_base = args.zero_pt_base_;
+            this->zero_pt_base = args.zero_pt_base;
             this->zero_pt_ld = args.zero_pt_ld;
             this->acc_base = args.acc_base;
             this->cnt_base = args.cnt_base;
