@@ -630,7 +630,7 @@ class StdThreading : public IThreading {
       func(0);
       while (true) {
         bool is_lock = false;
-        for (size_t i = 0; is_lock && i < mThreadNum - 1; i++) {
+        for (size_t i = 0; !is_lock && i < mThreadNum - 1; i++) {
           is_lock |= locks[i];
         }
         if (!is_lock) break;
@@ -656,7 +656,6 @@ class StdThreading : public IThreading {
     for (int i = 0; i < mThreadNum - 1; i++) thdset[i].join();
   }
   void create_threads() {
-    printf("1111111\n");
     thdset.clear();
     thdset.resize(mThreadNum - 1);
     locks.resize(mThreadNum - 1);
@@ -668,10 +667,11 @@ class StdThreading : public IThreading {
       thdset[i] = std::thread(
           [&](int tidx) {
             while (!stop[tidx]) {
-              _mm_pause();
               if (locks[tidx]) {
                 (*func_)(tidx + 1);
                 locks[tidx] = false;
+              } else {
+                _mm_pause();
               }
             }
           },
