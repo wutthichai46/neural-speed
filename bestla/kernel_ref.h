@@ -152,7 +152,6 @@ static inline BTLA_CODE transpose2d(const _T* srcptr, _T* dstptr, int row, int c
   return BTLA_CODE::Success;
 }
 
-template <int NTile>
 static inline BTLA_CODE compress_s8_s4(const int8_t* srcptr, utils::int4x2* dstptr, int row, int col, int ld_src,
                                        int ld_dst) {
   for (int j = 0; j < row; j++) {
@@ -166,7 +165,6 @@ static inline BTLA_CODE compress_s8_s4(const int8_t* srcptr, utils::int4x2* dstp
   return BTLA_CODE::Success;
 }
 
-template <int NTile>
 static inline BTLA_CODE compress_f4(const int8_t* srcptr, utils::f4x2* dstptr, int row, int col, int ld_src,
                                     int ld_dst) {
   for (int j = 0; j < row; j++) {

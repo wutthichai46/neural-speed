@@ -12,6 +12,7 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 #pragma once
+#include <cassert>
 #include "bestla.h"
 #include "bestla_gemm.h"
 #include "bestla_utils.h"
@@ -688,6 +689,7 @@ class StorageWeightKBlockNInteger : public IWeightKBlockBase {
     InfoType::resize(NPad, KPad, Block, N, K, qtype);
     auto bits = utils::bestla_dtype_bits(qtype);
     auto elesize = static_cast<size_t>(NPad) * KPad;
+    if (qtype == BTLA_DTYPE::S3_CLIP) elesize = static_cast<size_t>(utils::padto(NPad, 64)) * KPad;
     auto bytes = utils::updiv(elesize * bits, 8);  // add 3bits, 5btis, 7bits size calculation here
     mQBuf.resize(bytes);
     int nk_scale = utils::updiv(KPad, Block);
