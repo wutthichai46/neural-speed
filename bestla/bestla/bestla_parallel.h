@@ -13,17 +13,17 @@
 //  limitations under the License.
 #pragma once
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <queue>
 #include <functional>
 #include <thread>
 #include <vector>
-#include <mutex>
-#include <shared_mutex>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 #include "bestla_utils.h"
 #include "bestla_device.h"
-#include "BS_thread_pool.hpp"
 
 namespace bestla {
 namespace parallel {
@@ -39,9 +39,9 @@ struct ThreadProblem2D {
   int size[2];
   bool valid;
   void print() {
-    printf("Thread %d indice:(%d,%d)\n", tid, tidx[0], tidx[1]);
-    printf("Thread location:(%d,%d)\n", loc[0], loc[1]);
-    printf("Thread problem size:(%d,%d)\n", size[0], size[1]);
+    // printf("Thread %d indice:(%d,%d)\n", tid, tidx[0], tidx[1]);
+    // printf("Thread location:(%d,%d)\n", loc[0], loc[1]);
+    // printf("Thread problem size:(%d,%d)\n", size[0], size[1]);
   }
 };
 class Scheduler2D {
@@ -77,8 +77,8 @@ class Scheduler2D {
   }
 
   void print() {
-    printf("Thread Block:(%d,%d)\n", mThdSize[0], mThdSize[1]);
-    printf("Thread in use:%d of %d, Nx%d\n", mThdValid, mThdCount, mThdPerRow);
+    // printf("Thread Block:(%d,%d)\n", mThdSize[0], mThdSize[1]);
+    // printf("Thread in use:%d of %d, Nx%d\n", mThdValid, mThdCount, mThdPerRow);
   }
 
   constexpr int* thread_size() { return mThdSize; }
@@ -173,10 +173,10 @@ class SchedulerBase : public Scheduler2D {
   constexpr int valid_theads() { return mThdValid; }
 
   virtual void print() {
-    printf("Thread Block:(%d,%d)\n", mThdSize[0], mThdSize[1]);
-    printf("Thread in use:%d of %d, Nx%d\n", mThdValid, mThdCount, mThdPerRow);
-    printf("GEMM MStep:%d NStep:%d KStep:%d\n", mBlock[0], mBlock[1], mBlock[2]);
-    printf("Cache Size:%zu used:%zu\n", mL2Size, mL2Use);
+    // printf("Thread Block:(%d,%d)\n", mThdSize[0], mThdSize[1]);
+    // printf("Thread in use:%d of %d, Nx%d\n", mThdValid, mThdCount, mThdPerRow);
+    // printf("GEMM MStep:%d NStep:%d KStep:%d\n", mBlock[0], mBlock[1], mBlock[2]);
+    // printf("Cache Size:%zu used:%zu\n", mL2Size, mL2Use);
   }
 
  protected:
@@ -333,10 +333,10 @@ class SchedulerKBlock : public Scheduler2D {
   constexpr int valid_theads() { return mThdValid; }
 
   void print() {
-    printf("Thread Block:(%d,%d)\n", mThdSize[0], mThdSize[1]);
-    printf("Thread in use:%d of %d, Nx%d\n", mThdValid, mThdCount, mThdPerRow);
-    printf("GEMM MStep:%d NStep:%d KStep:%d\n", mBlock[0], mBlock[1], mBlock[2]);
-    printf("Cache Size:%zu used:%zu\n", mL2Size, mL2Use);
+    // printf("Thread Block:(%d,%d)\n", mThdSize[0], mThdSize[1]);
+    // printf("Thread in use:%d of %d, Nx%d\n", mThdValid, mThdCount, mThdPerRow);
+    // printf("GEMM MStep:%d NStep:%d KStep:%d\n", mBlock[0], mBlock[1], mBlock[2]);
+    // printf("Cache Size:%zu used:%zu\n", mL2Size, mL2Use);
   }
 
  protected:
@@ -625,31 +625,22 @@ class StdThreading : public IThreading {
  public:
   explicit StdThreading(int nthreads) : IThreading(nthreads) { create_threads(); }
   void parallel_for(const thread_func& func) override {
+    // printf("forward begin\n");
     if (mThreadNum > 1) {
-      for (int i = 1; i < mThreadNum; i++)
-        pool.detach_task([func, i] {
-          func(i);
-          return 0;
-        });
+      // printf("%d\n", (int)workers_running);
+      {
+        const std::scoped_lock tasks_lock(tasks_mutex);
+        for (int i = 0; i < mThreadNum - 1; i++)
+          func_.emplace([func, i] {
+            func(i + 1);
+            return 0;
+          });
+      }
+      for (int i = 0; i < mThreadNum - 1; i++) task_available_cv.notify_one();
       func(0);
-      pool.wait();
-      // func_ = &func;
-      // // for (size_t i = 0; i < mThreadNum - 1; i++) {
-      // //   locks[i] = true;
-      // // }
-      // locks.unlock();
-      // func(0);
-      // // while (true) {
-      // //   bool is_lock = false;
-      // //   for (size_t i = 0; !is_lock && i < mThreadNum - 1; i++) {
-      // //     is_lock |= locks[i];
-      // //   }
-      // //   if (!is_lock) break;
-      // // }
-      // locks.lock();
-    } else {
-      func(0);
+      wait();
     }
+    // printf("forward end\n");
   }
 
   void set_threads(int nthreads) override {
@@ -664,41 +655,78 @@ class StdThreading : public IThreading {
 
  private:
   void stop_threads() {
-    // for (int i = 0; i < mThreadNum - 1; i++) stop[i] = true;
-    // locks.unlock();
+    wait();
+    destroy_threads();
+    // printf("stop begin\n");
+    // stop = true;
+    // m.unlock();
+    // cv_begin.notify_all();
     // for (int i = 0; i < mThreadNum - 1; i++) thdset[i].join();
+    // printf("stop end\n");
+  }
+  void wait() {
+    std::unique_lock tasks_lock(tasks_mutex);
+    waiting = true;
+    tasks_done_cv.wait(tasks_lock, [this] { return (tasks_running == 0); });
+    waiting = false;
+  }
+  void destroy_threads() {
+    {
+      const std::scoped_lock tasks_lock(tasks_mutex);
+      workers_running = false;
+    }
+    task_available_cv.notify_all();
+    for (int i = 0; i < mThreadNum - 1; ++i) {
+      thdset[i].join();
+    }
   }
   void create_threads() {
-    // thdset.clear();
-    // thdset.resize(mThreadNum - 1);
-    // // locks.resize(mThreadNum - 1);
-    // stop.resize(mThreadNum - 1);
-    // locks.try_lock();
+    // printf("creat begin:%d\n", mThreadNum);
+    std::unique_lock tasks_lock(tasks_mutex);
+    tasks_lock.unlock();
+    thdset.resize(mThreadNum - 1);
 
-    // for (size_t i = 0; i < mThreadNum - 1; i++) {
-    //   stop[i] = false;
-    //   // locks[i] = false;
-    //   thdset[i] = std::thread(
-    //       [&](int tidx) {
-    //         while (1) {
-    //           locks.lock_shared();
-    //           if (stop[tidx]) break;
-    //           //(*func_)(tidx + 1);
-    //           locks.unlock_shared();
-    //         }
+    {
+      const std::scoped_lock tasks_lock(tasks_mutex);
+      tasks_running = mThreadNum - 1;
+      workers_running = true;
+    }
+    for (int i = 0; i < mThreadNum - 1; ++i) {
+      thdset[i] = std::thread(
+          [&](int tidx) {
+            std::unique_lock tasks_lock(tasks_mutex);
+            while (true) {
+              --tasks_running;
+              tasks_lock.unlock();
+              if (waiting && (tasks_running == 0) && func_.empty()) tasks_done_cv.notify_all();
+              tasks_lock.lock();
+              task_available_cv.wait(tasks_lock, [this, tidx] { return !func_.empty() || !workers_running; });
+              // printf("worker:%d\n", (int)workers_running);
+              if (!workers_running) break;
+              {
+                const std::function<void()> task = std::move(func_.front());
+                func_.pop();
+                ++tasks_running;
+                tasks_lock.unlock();
+                // printf("running idx:%d\n", tidx);
+                task();
+              }
+              tasks_lock.lock();
+            }
+          },
+          i);
+    }
 
-    //         locks.unlock_shared();
-    //       },
-    //       int(i));
-    // }
-    pool.reset(mThreadNum);
+    tasks_lock.lock();
+    // printf("creat end\n");
   }
-
-  // std::vector<std::thread> thdset;
-  // std::vector<bool> stop;
-  // mutable std::shared_mutex locks;
-  // const thread_func* func_ = nullptr;
-  BS::thread_pool pool;
+  bool waiting, workers_running;
+  std::vector<std::thread> thdset;
+  bool stop = false;
+  std::mutex m, tasks_mutex;
+  std::condition_variable cv_begin, tasks_done_cv, task_available_cv;
+  std::atomic_int done = 0, tasks_running;
+  std::queue<std::function<void()>> func_;
 };
 
 class SingleThread : public StdThreading {
@@ -716,7 +744,7 @@ void GemmRun(Launch_T& launcher, const typename Launch_T::Param& args, parallel:
   Parallel_T para({th->num_threads(), args.problem, cb.mL2Cache, cb.mL1Cache});
   static bool flag = false;
   if (flag) {
-    printf("%s\n", __FUNCTION__);
+    // printf("%s\n", __FUNCTION__);
     para.print();
     flag = false;
   }
@@ -737,7 +765,7 @@ void GemmRunWithA(Launch_T& launcher, const typename Launch_T::Param& args, para
   auto apara = launcher.mProA.createParallel(th->num_threads(), args.problem);
   static bool flag = false;
   if (flag) {
-    printf("%s\n", __FUNCTION__);
+    // printf("%s\n", __FUNCTION__);
     para.print();
     flag = false;
   }
