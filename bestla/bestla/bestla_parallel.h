@@ -16,11 +16,14 @@
 #include <functional>
 #include <thread>
 #include <vector>
+#include <mutex>
+#include <shared_mutex>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 #include "bestla_utils.h"
 #include "bestla_device.h"
+#include "BS_thread_pool.hpp"
 
 namespace bestla {
 namespace parallel {
@@ -623,18 +626,27 @@ class StdThreading : public IThreading {
   explicit StdThreading(int nthreads) : IThreading(nthreads) { create_threads(); }
   void parallel_for(const thread_func& func) override {
     if (mThreadNum > 1) {
-      func_ = &func;
-      for (size_t i = 0; i < mThreadNum - 1; i++) {
-        locks[i] = true;
-      }
+      for (int i = 1; i < mThreadNum; i++)
+        pool.detach_task([func, i] {
+          func(i);
+          return 0;
+        });
       func(0);
-      while (true) {
-        bool is_lock = false;
-        for (size_t i = 0; !is_lock && i < mThreadNum - 1; i++) {
-          is_lock |= locks[i];
-        }
-        if (!is_lock) break;
-      }
+      pool.wait();
+      // func_ = &func;
+      // // for (size_t i = 0; i < mThreadNum - 1; i++) {
+      // //   locks[i] = true;
+      // // }
+      // locks.unlock();
+      // func(0);
+      // // while (true) {
+      // //   bool is_lock = false;
+      // //   for (size_t i = 0; !is_lock && i < mThreadNum - 1; i++) {
+      // //     is_lock |= locks[i];
+      // //   }
+      // //   if (!is_lock) break;
+      // // }
+      // locks.lock();
     } else {
       func(0);
     }
@@ -652,36 +664,41 @@ class StdThreading : public IThreading {
 
  private:
   void stop_threads() {
-    for (int i = 0; i < mThreadNum - 1; i++) stop[i] = true;
-    for (int i = 0; i < mThreadNum - 1; i++) thdset[i].join();
+    // for (int i = 0; i < mThreadNum - 1; i++) stop[i] = true;
+    // locks.unlock();
+    // for (int i = 0; i < mThreadNum - 1; i++) thdset[i].join();
   }
   void create_threads() {
-    thdset.clear();
-    thdset.resize(mThreadNum - 1);
-    locks.resize(mThreadNum - 1);
-    stop.resize(mThreadNum - 1);
+    // thdset.clear();
+    // thdset.resize(mThreadNum - 1);
+    // // locks.resize(mThreadNum - 1);
+    // stop.resize(mThreadNum - 1);
+    // locks.try_lock();
 
-    for (size_t i = 0; i < mThreadNum - 1; i++) {
-      stop[i] = false;
-      locks[i] = false;
-      thdset[i] = std::thread(
-          [&](int tidx) {
-            while (!stop[tidx]) {
-              if (locks[tidx]) {
-                (*func_)(tidx + 1);
-                locks[tidx] = false;
-              } else {
-                _mm_pause();
-              }
-            }
-          },
-          int(i));
-    }
+    // for (size_t i = 0; i < mThreadNum - 1; i++) {
+    //   stop[i] = false;
+    //   // locks[i] = false;
+    //   thdset[i] = std::thread(
+    //       [&](int tidx) {
+    //         while (1) {
+    //           locks.lock_shared();
+    //           if (stop[tidx]) break;
+    //           //(*func_)(tidx + 1);
+    //           locks.unlock_shared();
+    //         }
+
+    //         locks.unlock_shared();
+    //       },
+    //       int(i));
+    // }
+    pool.reset(mThreadNum);
   }
 
-  std::vector<std::thread> thdset;
-  std::vector<bool> locks, stop;
-  const thread_func* func_ = nullptr;
+  // std::vector<std::thread> thdset;
+  // std::vector<bool> stop;
+  // mutable std::shared_mutex locks;
+  // const thread_func* func_ = nullptr;
+  BS::thread_pool pool;
 };
 
 class SingleThread : public StdThreading {
