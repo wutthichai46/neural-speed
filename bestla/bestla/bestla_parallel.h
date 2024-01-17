@@ -631,7 +631,7 @@ class StdThreading : public IThreading {
       {
         const std::scoped_lock tasks_lock(tasks_mutex);
         for (int i = 0; i < mThreadNum - 1; i++)
-          func_.emplace([func, i] {
+          func_.push_back([func, i] {
             func(i + 1);
             return 0;
           });
@@ -704,8 +704,8 @@ class StdThreading : public IThreading {
               // printf("worker:%d\n", (int)workers_running);
               if (!workers_running) break;
               {
-                const std::function<void()> task = std::move(func_.front());
-                func_.pop();
+                const std::function<void()> task = std::move(func_.back());
+                func_.pop_back();
                 ++tasks_running;
                 tasks_lock.unlock();
                 // printf("running idx:%d\n", tidx);
@@ -726,7 +726,7 @@ class StdThreading : public IThreading {
   std::mutex m, tasks_mutex;
   std::condition_variable cv_begin, tasks_done_cv, task_available_cv;
   std::atomic_int done = 0, tasks_running;
-  std::queue<std::function<void()>> func_;
+  std::vector<std::function<void()>> func_;
 };
 
 class SingleThread : public StdThreading {
