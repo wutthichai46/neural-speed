@@ -630,23 +630,30 @@ class StdThreading : public IThreading {
       // printf("%d\n", (int)workers_running);
       {
         const std::scoped_lock tasks_lock(tasks_mutex);
-        for (int i = 0; i < mThreadNum - 1; i++)
-          func_.push_back([func, i] {
+        tasks_running = mThreadNum - 1;
+        for (int i = 0; i < mThreadNum - 1; i++) {
+          func_[i] = [func, i] {
             func(i + 1);
             return 0;
-          });
+          };
+        }
       }
-      for (int i = 0; i < mThreadNum - 1; i++) task_available_cv.notify_one();
+      // printf("func end:%d\n", tasks_running.load());
+      task_available_cv.notify_all();
+      // printf("notify end\n");
       func(0);
+      // printf("main end\n");
       wait();
     }
     // printf("forward end\n");
   }
 
   void set_threads(int nthreads) override {
-    stop_threads();
-    mThreadNum = nthreads;
-    create_threads();
+    if (nthreads != mThreadNum) {
+      stop_threads();
+      mThreadNum = nthreads;
+      create_threads();
+    }
   }
 
   inline void sync() const override { assert(0); }
@@ -655,7 +662,7 @@ class StdThreading : public IThreading {
 
  private:
   void stop_threads() {
-    wait();
+    // wait();
     destroy_threads();
     // printf("stop begin\n");
     // stop = true;
@@ -671,6 +678,7 @@ class StdThreading : public IThreading {
     waiting = false;
   }
   void destroy_threads() {
+    // printf("destroy begin\n");
     {
       const std::scoped_lock tasks_lock(tasks_mutex);
       workers_running = false;
@@ -679,6 +687,7 @@ class StdThreading : public IThreading {
     for (int i = 0; i < mThreadNum - 1; ++i) {
       thdset[i].join();
     }
+    // printf("destroy end\n");
   }
   void create_threads() {
     // printf("creat begin:%d\n", mThreadNum);
@@ -697,18 +706,18 @@ class StdThreading : public IThreading {
             std::unique_lock tasks_lock(tasks_mutex);
             while (true) {
               --tasks_running;
+              // printf("%d now runing:%d\t%d\n", tidx, tasks_running.load(), (int)(waiting && func_[tidx] == nullptr));
               tasks_lock.unlock();
-              if (waiting && (tasks_running == 0) && func_.empty()) tasks_done_cv.notify_all();
+              if (waiting && (tasks_running == 0) && func_[tidx] == nullptr) tasks_done_cv.notify_all();
               tasks_lock.lock();
-              task_available_cv.wait(tasks_lock, [this, tidx] { return !func_.empty() || !workers_running; });
+              task_available_cv.wait(tasks_lock, [this, tidx] { return func_[tidx] != nullptr || !workers_running; });
               // printf("worker:%d\n", (int)workers_running);
               if (!workers_running) break;
               {
-                const std::function<void()> task = std::move(func_.back());
-                func_.pop_back();
-                ++tasks_running;
+                const std::function<void()> task = std::move(func_[tidx]);
+                func_[tidx] = nullptr;
+                // printf("%d now runing:%d\n", tidx, tasks_running.load());
                 tasks_lock.unlock();
-                // printf("running idx:%d\n", tidx);
                 task();
               }
               tasks_lock.lock();
@@ -726,7 +735,7 @@ class StdThreading : public IThreading {
   std::mutex m, tasks_mutex;
   std::condition_variable cv_begin, tasks_done_cv, task_available_cv;
   std::atomic_int done = 0, tasks_running;
-  std::vector<std::function<void()>> func_;
+  std::function<void()> func_[100];
 };
 
 class SingleThread : public StdThreading {
@@ -749,11 +758,13 @@ void GemmRun(Launch_T& launcher, const typename Launch_T::Param& args, parallel:
     flag = false;
   }
   th->parallel_for([&](int tidx) {
+    // printf("tidx begin: %d\n", tidx);
     typename Parallel_T::ThreadProblem thdp{tidx};
     para.getIndex(thdp);
     if (thdp.valid) {
       launcher.run(args, thdp);
     }
+    // printf("tidx end: %d\n", tidx);
   });
 }
 
