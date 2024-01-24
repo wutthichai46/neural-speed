@@ -632,20 +632,17 @@ class StdThreading : public IThreading {
         const std::scoped_lock tasks_lock(tasks_mutex);
         tasks_running = mThreadNum - 1;
         for (int i = 0; i < mThreadNum - 1; i++) {
-          func_[i] = [func, i] {
-            func(i + 1);
-            return 0;
-          };
+          func_[i] = func;
         }
       }
       // printf("func end:%d\n", tasks_running.load());
       task_available_cv.notify_all();
       // printf("notify end\n");
       func(0);
-      // printf("main end\n");
+      printf("main end\n");
       wait();
     }
-    // printf("forward end\n");
+    printf("forward end\n");
   }
 
   void set_threads(int nthreads) override {
@@ -674,7 +671,7 @@ class StdThreading : public IThreading {
   void wait() {
     std::unique_lock tasks_lock(tasks_mutex);
     waiting = true;
-    tasks_done_cv.wait(tasks_lock, [this] { return (tasks_running == 0); });
+    tasks_done_cv.wait(tasks_lock, [this] { return (tasks_running.load() == 0); });
     waiting = false;
   }
   void destroy_threads() {
@@ -703,22 +700,23 @@ class StdThreading : public IThreading {
     for (int i = 0; i < mThreadNum - 1; ++i) {
       thdset[i] = std::thread(
           [&](int tidx) {
-            std::unique_lock tasks_lock(tasks_mutex);
             while (true) {
-              --tasks_running;
-              // printf("%d now runing:%d\t%d\n", tidx, tasks_running.load(), (int)(waiting && func_[tidx] == nullptr));
+              tasks_running.fetch_sub(1);
+              // printf("%d now runing:%d\t%d\n", tidx, tasks_running.load(),
+              //        (int)(waiting.load() && func_[tidx] == nullptr));
               tasks_lock.unlock();
-              if (waiting && (tasks_running == 0) && func_[tidx] == nullptr) tasks_done_cv.notify_all();
-              tasks_lock.lock();
+              if (waiting.load() && (tasks_running.load() == 0) && func_[tidx] == nullptr) tasks_done_cv.notify_all();
+              std::unique_lock tasks_lock(tasks_mutex);
               task_available_cv.wait(tasks_lock, [this, tidx] { return func_[tidx] != nullptr || !workers_running; });
+              tasks_lock.unlock();
               // printf("worker:%d\n", (int)workers_running);
               if (!workers_running) break;
               {
-                const std::function<void()> task = std::move(func_[tidx]);
+                // const thread_func task = std::move(func_[tidx]);
+                func_[tidx](tidx + 1);
                 func_[tidx] = nullptr;
                 // printf("%d now runing:%d\n", tidx, tasks_running.load());
-                tasks_lock.unlock();
-                task();
+                // task(tidx + 1);
               }
               tasks_lock.lock();
             }
@@ -729,13 +727,13 @@ class StdThreading : public IThreading {
     tasks_lock.lock();
     // printf("creat end\n");
   }
-  bool waiting, workers_running;
+  std::atomic_bool waiting, workers_running;
   std::vector<std::thread> thdset;
   bool stop = false;
   std::mutex m, tasks_mutex;
   std::condition_variable cv_begin, tasks_done_cv, task_available_cv;
   std::atomic_int done = 0, tasks_running;
-  std::function<void()> func_[100];
+  thread_func func_[100];
 };
 
 class SingleThread : public StdThreading {
