@@ -135,10 +135,7 @@ enum gguf_type {
 };
 
 static const char* GGUF_TYPE_NAME[GGUF_TYPE_COUNT] = {
-    [GGUF_TYPE_UINT8] = "u8",    [GGUF_TYPE_INT8] = "i8",   [GGUF_TYPE_UINT16] = "u16",  [GGUF_TYPE_INT16] = "i16",
-    [GGUF_TYPE_UINT32] = "u32",  [GGUF_TYPE_INT32] = "i32", [GGUF_TYPE_FLOAT32] = "f32", [GGUF_TYPE_BOOL] = "bool",
-    [GGUF_TYPE_STRING] = "str",  [GGUF_TYPE_ARRAY] = "arr", [GGUF_TYPE_UINT64] = "u64",  [GGUF_TYPE_INT64] = "i64",
-    [GGUF_TYPE_FLOAT64] = "f64",
+    "u8", "i8", "u16", "i16", "u32", "i32", "f32", "bool", "str", "arr", "u64", "i64", "f64",
 };
 
 union gguf_value {
@@ -201,19 +198,19 @@ struct gguf_context {
 #define GGUF_DEFAULT_ALIGNMENT 32
 
 static const size_t GGUF_TYPE_SIZE[GGUF_TYPE_COUNT] = {
-    [GGUF_TYPE_UINT8] = sizeof(uint8_t),
-    [GGUF_TYPE_INT8] = sizeof(int8_t),
-    [GGUF_TYPE_UINT16] = sizeof(uint16_t),
-    [GGUF_TYPE_INT16] = sizeof(int16_t),
-    [GGUF_TYPE_UINT32] = sizeof(uint32_t),
-    [GGUF_TYPE_INT32] = sizeof(int32_t),
-    [GGUF_TYPE_FLOAT32] = sizeof(float),
-    [GGUF_TYPE_BOOL] = sizeof(bool),
-    [GGUF_TYPE_STRING] = sizeof(struct gguf_str),
-    [GGUF_TYPE_ARRAY] = 0,  // undefined
-    [GGUF_TYPE_UINT64] = sizeof(uint64_t),
-    [GGUF_TYPE_INT64] = sizeof(int64_t),
-    [GGUF_TYPE_FLOAT64] = sizeof(double),
+    sizeof(uint8_t),
+    sizeof(int8_t),
+    sizeof(uint16_t),
+    sizeof(int16_t),
+    sizeof(uint32_t),
+    sizeof(int32_t),
+    sizeof(float),
+    sizeof(bool),
+    sizeof(struct gguf_str),
+    0,  // undefined
+    sizeof(uint64_t),
+    sizeof(int64_t),
+    sizeof(double),
 };
 static_assert(GGUF_TYPE_COUNT == 13, "GGUF_TYPE_COUNT != 13");
 
@@ -231,17 +228,21 @@ enum llm_arch {
   LLM_ARCH_BLOOM,
   LLM_ARCH_STABLELM,
   LLM_ARCH_QWEN,
+  LLM_ARCH_CHATGLM,
   LLM_ARCH_CHATGLM2,
+  LLM_ARCH_PHI,
   LLM_ARCH_UNKNOWN,
 };
 
 static std::map<llm_arch, std::string> LLM_ARCH_NAMES = {
-    {LLM_ARCH_LLAMA, "llama"},       {LLM_ARCH_FALCON, "falcon"},       {LLM_ARCH_GPT2, "gpt2"},
-    {LLM_ARCH_GPTJ, "gptj"},         {LLM_ARCH_GPTNEOX, "gptneox"},     {LLM_ARCH_MPT, "mpt"},
-    {LLM_ARCH_BAICHUAN, "baichuan"}, {LLM_ARCH_STARCODER, "starcoder"}, {LLM_ARCH_PERSIMMON, "persimmon"},
-    {LLM_ARCH_REFACT, "refact"},     {LLM_ARCH_BLOOM, "bloom"},         {LLM_ARCH_STABLELM, "stablelm"},
-    {LLM_ARCH_QWEN, "qwen"},         {LLM_ARCH_CHATGLM2, "chatglm2"},
-};
+    {LLM_ARCH_LLAMA, "llama"},         {LLM_ARCH_FALCON, "falcon"},
+    {LLM_ARCH_GPT2, "gpt2"},           {LLM_ARCH_GPTJ, "gptj"},
+    {LLM_ARCH_GPTNEOX, "gptneox"},     {LLM_ARCH_MPT, "mpt"},
+    {LLM_ARCH_BAICHUAN, "baichuan"},   {LLM_ARCH_STARCODER, "starcoder"},
+    {LLM_ARCH_PERSIMMON, "persimmon"}, {LLM_ARCH_REFACT, "refact"},
+    {LLM_ARCH_BLOOM, "bloom"},         {LLM_ARCH_STABLELM, "stablelm"},
+    {LLM_ARCH_QWEN, "qwen"},           {LLM_ARCH_CHATGLM, "chatglm"},
+    {LLM_ARCH_CHATGLM2, "chatglm2"},   {LLM_ARCH_PHI, "phi"}};
 
 struct gguf_tensor_info {
   struct gguf_str name;
@@ -296,6 +297,10 @@ inline static void* ggml_aligned_malloc(size_t size) {
     return NULL;
   }
   void* aligned_memory = NULL;
+#ifdef _MSC_VER
+  aligned_memory = _aligned_malloc(size, GGML_MEM_ALIGN);
+  int result = aligned_memory ? 0 : 1;
+#else
 #ifdef GGML_USE_CPU_HBM
   int result = hbw_posix_memalign(&aligned_memory, 16, size);
 #elif GGML_USE_METAL
@@ -303,6 +308,8 @@ inline static void* ggml_aligned_malloc(size_t size) {
 #else
   int result = posix_memalign(&aligned_memory, GGML_MEM_ALIGN, size);
 #endif
+#endif
+
   if (result != 0) {
     // Handle allocation failure
     const char* error_desc = "unknown allocation error";
@@ -491,6 +498,15 @@ static std::map<llm_kv, std::string> LLM_KV_NAMES = {
     {LLM_KV_TOKENIZER_RWKV, "tokenizer.rwkv.world"},
 };
 
+static llm_arch llm_arch_from_string(const std::string& name) {
+  for (const auto& kv : LLM_ARCH_NAMES) {  // NOLINT
+    if (kv.second == name) {
+      return kv.first;
+    }
+  }
+
+  return LLM_ARCH_UNKNOWN;
+}
 struct LLM_KV {
   LLM_KV(llm_arch arch) : arch(arch) {}
 

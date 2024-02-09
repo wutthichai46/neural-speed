@@ -35,7 +35,7 @@
 #include "models/model_utils/model_config.h"
 #include "models/model_utils/model_files.h"
 #include "models/model_utils/model_types.h"
-#include "models/model_utils/model_utils.h"
+#include "models/model_utils/quant_utils.h"
 #include "models/model_utils/util.h"
 #include "models/models.h"
 
@@ -75,7 +75,7 @@ void GPTJ::init(const char* path_model, model_context* ctx, int n_gpu_layer_, bo
   n_embd = hparams.n_embd;
   n_vocab = hparams.n_vocab;
   n_layer = hparams.n_layer;
-  scratch = gptj_mem_req(n_layer);
+  scratch = gptj_mem_req(n_layer, lctx.model_scratch_enlarge_scale);
   model.scratchs = scratch;
 }
 

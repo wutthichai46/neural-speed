@@ -30,7 +30,7 @@ beam_list=(1)
 extra_precision_list=("q4_j_i8_g128" "q4_j_i8_g32" "q4_0") # precisions to be tested for most of supported models
 
 ppl_dataset_list=("/tf_dataset2/datasets/nlp_toolkit/wikitext-2-raw-v1-data-test")
-ppl_nctx_list=() # no ppl test by defalut
+ppl_nctx_list=() # no ppl test by default
 # ppl_nctx_list=(256 1024 2048)
 drop_caches=false
 ppl_fp32_test=false
@@ -114,7 +114,11 @@ function ppl_eval() {
     if [[ "$ppl_mf16_test" = true ]]; then
         memory_dtype_list+=('f16')
     fi
-
+    echo "======   Prepare Env  ==============="
+    [[ $(pip list | grep intel_extension_for_transformers | wc -l) == 0 ]] && pip install intel_extension_for_transformers
+    [[ $(pip list | grep datasets | wc -l) == 0 ]] && pip install datasets
+    [[ $(pip list | grep transformers | wc -l) == 0 ]] && pip install transformers
+    pip list
     echo "=======  PPL Evaluation Start  ======="
     for memory_dtype in ${memory_dtype_list[@]}; do
         for ppl_dataset in ${ppl_dataset_list[@]}; do
@@ -122,7 +126,7 @@ function ppl_eval() {
                 local ppl_task_name="$task_name-ppl-$(basename -- "$ppl_dataset")-nctx$ppl_nctx-M$memory_dtype"
                 echo "***** PPL: $ppl_task_name *****"
                 OMP_NUM_THREADS=$(($n_cores * 1)) numactl -m 0 -C 0-$(($n_cores * 1 - 1)) \
-                    python scripts/perplexity.py --model_name "$model_path" --dataset_name "$ppl_dataset" --quantized_weight_path "$quantized_weight_path" --ctx_size $ppl_nctx --n_threads $n_cores --memory_dtype $memory_dtype 2>&1 |
+                    python $working_dir/scripts/perplexity.py --model_name "$model_path" --dataset_name "$ppl_dataset" --quantized_weight_path "$quantized_weight_path" --ctx_size $ppl_nctx --n_threads $n_cores --memory_dtype $memory_dtype 2>&1 |
                     tee "$WORKSPACE/$ppl_task_name.log"
                 mv out/ppl.png "$WORKSPACE/$ppl_task_name.png"
                 mv out/ppl_data.json "$WORKSPACE/$ppl_task_name.json"
@@ -150,6 +154,7 @@ model_name_map["mistral-7b"]="mistralai/Mistral-7B-v0.1"
 model_name_map["qwen-7b"]="Qwen/Qwen-7B-Chat"
 model_name_map["magicoder"]="ise-uiuc/Magicoder-S-DS-6.7B"
 model_name_map["whisper"]="openai/whisper-tiny"
+model_name_map["phi2"]="microsoft/phi-2"
 
 function main() {
     conda_env="$1"
@@ -221,39 +226,43 @@ function main() {
     elif [[ "${model}" == "chatglm-6b" ]]; then
         quant_script="./build/bin/quant_chatglm"
         convert_script="${convert_script}/convert_chatglm.py"
-        infer_cmd="python ./scripts/inference.py"
+        infer_cmd="python $working_dir/scripts/inference.py"
         extension=" --model_name chatglm --tokenizer $model_path"
-        requirements_file="scripts/requirements/chatglm-6b.sh"
+        requirements_file="$working_dir/neural_speed/models/requirements/chatglm-6b.sh"
     elif [[ "${model}" == "baichuan2-13b" ]]; then
         quant_script="./build/bin/quant_baichuan"
         convert_script="${convert_script}/convert_baichuan.py"
-        infer_cmd="python ./scripts/inference.py"
-        requirements_file="scripts/requirements/baichuan.sh"
+        infer_cmd="python $working_dir/scripts/inference.py"
+        requirements_file="$working_dir/neural_speed/models/requirements/baichuan.sh"
         extension=" --model_name baichuan --tokenizer $model_path"
     elif [[ "${model}" == "baichuan-13b" ]]; then
         quant_script="./build/bin/quant_baichuan"
         convert_script="${convert_script}/convert_baichuan.py"
-        infer_cmd="python ./scripts/inference.py"
+        infer_cmd="python $working_dir/scripts/inference.py"
         extension=" --model_name baichuan --tokenizer $model_path"
-        requirements_file="scripts/requirements/baichuan.sh"
+        requirements_file="$working_dir/neural_speed/models/requirements/baichuan.sh"
     elif [[ "${model}" == "mistral-7b" ]]; then
         quant_script="./build/bin/quant_mistral"
         convert_script="${convert_script}/convert_mistral.py"
         infer_cmd="./build/bin/run_mistral"
-        requirements_file="scripts/requirements/mistral.txt"
+        requirements_file="$working_dir/neural_speed/models/requirements/mistral.txt"
     elif [[ "${model}" == "qwen-7b" ]]; then
         quant_script="./build/bin/quant_qwen"
         convert_script="${convert_script}/convert_qwen.py"
         infer_cmd="./build/bin/run_qwen"
     elif [[ "${model}" == "magicoder" ]]; then
         quant_script="./build/bin/quant_llama"
-        convert_script="${convert_script}/convert_bmagicoder.py"
+        convert_script="${convert_script}/convert_llama.py"
         infer_cmd="./build/bin/run_llama"
     elif [[ "${model}" == "whisper" ]]; then
         quant_script="./build/bin/quant_whisper"
         convert_script="${convert_script}/convert_whisper.py"
         infer_cmd="./build/bin/run_whisper"
         precision_list+=("q4_0")
+    elif [[ "${model}" == "phi2" ]]; then
+        quant_script="./build/bin/quant_phi"
+        convert_script="${convert_script}/convert_phi.py"
+        infer_cmd="./build/bin/run_phi"
     else
         echo "Error: Unexpedted model: $model" 1>&2
         exit 1
@@ -285,7 +294,7 @@ function main() {
     if [[ "${compiler_version}" != "12.1.0" ]]; then
         conda install --update-deps -c conda-forge gxx==${compiler_version} gcc==${compiler_version} gxx_linux-64==${compiler_version} libstdcxx-ng sysroot_linux-64 -y
     fi
-
+    export LD_LIBRARY_PATH=${HOME}/miniconda3/envs/${conda_env}/lib/:$LD_LIBRARY_PATH
     # setup conda env for LLM
 
     # get cpu info
@@ -300,7 +309,7 @@ function main() {
     ninja
     cd ..
 
-    ## prepare example requiement
+    ## prepare example requirement
     if [[ $requirements_file == *'.txt' ]]; then
         pip install -r "$requirements_file"
     elif [[ $requirements_file == *'.sh' ]]; then
@@ -386,8 +395,8 @@ function main() {
                     export LANG=en_US.UTF-8
                     export LC_ALL=en_US.UTF-8
                     echo "=======  Inference Start  ======="
-                    if [[ "${model}" == "whisper" ]];then OMP_NUM_THREADS=$cores_per_instance numactl -m 0 -C 0-$(($cores_per_instance - 1)) \
-                        NEURAL_SPEED_VERBOSE=1 $infer_cmd -f "/tf_dataset2/models/nlp_toolkit/whisper-tiny/jfk.wav" -m ${model}-${precision}.bin
+                    if [[ "${model}" == "whisper" ]];then NEURAL_SPEED_VERBOSE=1 OMP_NUM_THREADS=$cores_per_instance numactl -m 0 -C 0-$(($cores_per_instance - 1)) \
+                         $infer_cmd -f "/tf_dataset2/models/nlp_toolkit/whisper-tiny/jfk.wav" -m ${model}-${precision}.bin
                     else
                         real_ctx=$ctx # TODO(Zhenzhong): use same ctx for  chatglm & baichuan
                         [[ "${model}" == "chatglm2" || "${model}" == "chatglm-6b" ||

@@ -29,6 +29,8 @@ static const model_scratch qwen_mem_req(int n_layers) {
     case 40:
       return {2048ull * MB, 2048ull * MB, 4096ull * MB};
     case 32:
+      return {1024ull * MB, 1024ull * MB, 1608ull * MB};
+    case 24:
       return {512ull * MB, 512ull * MB, 1026ull * MB};
     default:
       MODEL_ASSERT(false);

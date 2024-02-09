@@ -37,18 +37,8 @@
 #include "core/data_types.h"
 #include "layers/layers.h"
 
-#define NE_FILE_MAGIC 0x67676d6c  // "ne"
-#define NE_FILE_VERSION 1
-
 #define NE_QNT_VERSION 2            // bump this on quantization format changes
 #define NE_QNT_VERSION_FACTOR 1000  // do not change this
-
-#define NE_MAX_DIMS 4
-#define NE_MAX_NODES 8192
-#define NE_MAX_PARAMS 256
-#define NE_MAX_CONTEXTS 64
-#define NE_MAX_OPT 4
-#define NE_DEFAULT_N_THREADS 4
 
 #define NE_UNUSED(x) (void)(x)
 #define NE_TENSOR_LOCALS_1(type, prefix, pointer, array) \
@@ -403,29 +393,30 @@ NE_API struct ne_tensor* ne_soft_max_inplace(struct ne_context* ctx, struct ne_t
 // if mode & 4 == 1, especially for glm
 // TODO: avoid creating a new tensor every time
 NE_API struct ne_tensor* ne_rope(struct ne_context* ctx, struct ne_tensor* a, int n_past, int n_dims, int mode,
-                                 int prompt_size, float freq_base);
+                                 int prompt_size, float freq_base, float freq_scale);
 
 // in-place, returns view(a)
 NE_API struct ne_tensor* ne_rope_inplace(struct ne_context* ctx, struct ne_tensor* a, int n_past, int n_dims, int mode,
-                                         int prompt_size, float freq_base);
+                                         int prompt_size, float freq_base, float freq_scale);
 
 // shift all tokens by a give p (n_shift)
 // Optionally give a 1d tensor of precomputed interleaved cos/sin value of n_shift*scale^k for k \in [0, n_dims)
 NE_API struct ne_tensor* ne_rope_shift_inplace(struct ne_context* ctx, struct ne_tensor* a, int n_shift, int n_dims,
                                                int mode, int prompt_size, int n_keep, struct ne_tensor* cossin,
-                                               float freq_base);
+                                               float freq_base, float freq_scale);
 
 // rotary position embedding backward, i.e compute dx from dy
 // a - dy
 NE_API struct ne_tensor* ne_rope_back(struct ne_context* ctx, struct ne_tensor* a, int n_past, int n_dims, int mode);
 
 NE_API struct ne_tensor* ne_rope_with_padding(struct ne_context* ctx, struct ne_tensor* a, int n_past, int n_dims,
-                                              int mode, int prompt_size, int* n_padding, float freq_base);
+                                              int mode, int prompt_size, int* n_padding, float freq_base,
+                                              float freq_scale);
 
 // in-place, returns view(a)
 NE_API struct ne_tensor* ne_rope_with_padding_inplace(struct ne_context* ctx, struct ne_tensor* a, int n_past,
                                                       int n_dims, int mode, int prompt_size, int* n_padding,
-                                                      float freq_base);
+                                                      float freq_base, float freq_scale);
 
 // alibi position embedding
 // in-place, returns view(a)

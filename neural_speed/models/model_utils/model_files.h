@@ -79,7 +79,16 @@ struct model_load_tensor_shard {
   void calc_size() { size = model_calc_tensor_size(ne, type); }
 };
 
-enum model_split_type { SPLIT_NONE, SPLIT_BY_COLUMNS, SPLIT_BY_ROWS, TP_1D_ROW, TP_1D_COLUMN, TP_1D_ONLY_MASTER };
+enum model_split_type {
+  SPLIT_NONE,
+  SPLIT_BY_COLUMNS,
+  SPLIT_BY_ROWS,
+  TP_1D_ROW,
+  TP_1D_COLUMN,
+  TP_1D_ONLY_MASTER,
+  TP_1D_QKV_ROW,
+  TP_1D_QKV_COLUMN
+};
 
 struct model_load_tensor {
   std::vector<model_load_tensor_shard> shards;
@@ -140,6 +149,11 @@ struct model_load_tensor {
           name.find(".attn.k_proj.weight") != std::string::npos ||
           name.find(".attn.v_proj.weight") != std::string::npos ||
           name.find(".mlp.fc_in.weight") != std::string::npos ||
+          // for baichuan
+          name.find(".mlp.gate_proj.weight") != std::string::npos ||
+          name.find(".mlp.up_proj.weight") != std::string::npos ||
+          // for chatglm2
+          name.find(".mlp.dense_h_to_4h.weight") != std::string::npos ||
           // for llama model
           name.find(".attention.wq.weight") != std::string::npos ||
           name.find(".attention.wk.weight") != std::string::npos ||
@@ -148,8 +162,22 @@ struct model_load_tensor {
           name.find(".feed_forward.w3.weight") != std::string::npos) {
         split_type = TP_1D_ROW;
       }
+      if (name.find(".self_attn.W_pack.weight") != std::string::npos ||
+          // for chatglm2
+          name.find(".self_attention.query_key_value.weight") != std::string::npos) {
+        split_type = TP_1D_QKV_ROW;
+      }
+      if (name.find(".self_attention.query_key_value.bias") != std::string::npos) {
+        split_type = TP_1D_QKV_COLUMN;
+      }
       if (name.find(".mlp.fc_in.bias") != std::string::npos || name.find(".mlp.fc_out.weight") != std::string::npos ||
           name.find(".attn.out_proj.weight") != std::string::npos ||
+          name.find(".self_attention.dense.weight") != std::string::npos ||
+          // for baichuan
+          name.find(".self_attn.o_proj.weight") != std::string::npos ||
+          name.find(".mlp.down_proj.weight") != std::string::npos ||
+          // for chatglm2
+          name.find(".mlp.dense_4h_to_h.weight") != std::string::npos ||
           // TODO check if this part should be column
           name.find(".attention.wo.weight") != std::string::npos ||
           name.find(".feed_forward.w2.weight") != std::string::npos) {
@@ -185,11 +213,13 @@ struct model_load_tensor {
         break;
 #ifdef NS_TP_MODEL
       case TP_1D_ROW:
+      case TP_1D_QKV_ROW:
         MODEL_ASSERT(first_shard.ne.size() > 1);
         MODEL_ASSERT(first_shard.ne[1] % world_size == 0);
         ne = {first_shard.ne[0], first_shard.ne[1] / world_size};
         break;
       case TP_1D_COLUMN:
+      case TP_1D_QKV_COLUMN:
         MODEL_ASSERT(first_shard.ne[0] % world_size == 0);
         if (first_shard.ne.size() == 1) {
           ne = {first_shard.ne[0] / world_size};
@@ -764,7 +794,7 @@ struct gguf_loader {
       model_load_tensor_shard shard;
       std::string name = gguf_get_tensor_name(ctx, i);
       uint32_t name_len = name.length();
-      shard.type = (enum ne_type)0;
+      shard.type = (enum ne_type)info->type;
 
       uint32_t n_dims = info->n_dims;
       shard.ne.resize(n_dims);
@@ -783,12 +813,14 @@ struct gguf_loader {
         case NE_TYPE_Q5_0:
         case NE_TYPE_Q5_1:
         case NE_TYPE_Q8_0:
+        case NE_TYPE_Q6_K:
         case NE_TYPE_BTLA:
           break;
         default: {
           throw format("unrecognized tensor type %u\n", shard.type);
         }
       }
+
       shard.file_idx = 0;
       const size_t offs = file_offset(ctx, name.c_str());
       int length = info->ne[0] * info->ne[1] * info->ne[2] * info->ne[3] * 4;
@@ -857,28 +889,41 @@ struct gguf_loader {
       printf("%s: - kv %3d: %42s %-16s = %s\n", __func__, i, name, type_name.c_str(), value.c_str());
     }
 
+    // Get model name
+    uint32_t general_architecture_idex = 0;
+    std::string arch_name = gguf_kv_to_str(ctx_gguf, general_architecture_idex);
+    llm_arch arch = llm_arch_from_string(arch_name);
+    const auto kv = LLM_KV(arch);
+
+    // Get general kv
     uint32_t magic = -1;
     uint32_t version = -1;
-    std::string arch = "unknown";
-    GGUF_GET_KEY(ctx_gguf, arch, gguf_get_val_str, GGUF_TYPE_STRING, false, "general.architecuture");
     GGUF_GET_KEY(ctx_gguf, magic, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "magic");
     GGUF_GET_KEY(ctx_gguf, version, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "version");
 
-    // get hparams kv
+    // Get hparams kv
     GGUF_GET_KEY(ctx_gguf, hparams.n_vocab, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "n_vocab");
-    GGUF_GET_KEY(ctx_gguf, hparams.n_embd, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "n_embd");
+    GGUF_GET_KEY(ctx_gguf, hparams.n_embd, gguf_get_val_u32, GGUF_TYPE_UINT32, false, kv(LLM_KV_EMBEDDING_LENGTH));
     GGUF_GET_KEY(ctx_gguf, hparams.n_mult, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "n_mult");
-    GGUF_GET_KEY(ctx_gguf, hparams.n_head, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "n_head");
-    GGUF_GET_KEY(ctx_gguf, hparams.n_head_kv, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "n_head_kv");
-    GGUF_GET_KEY(ctx_gguf, hparams.n_layer, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "n_layer");
-    GGUF_GET_KEY(ctx_gguf, hparams.n_rot, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "n_rot");
+    GGUF_GET_KEY(ctx_gguf, hparams.n_head, gguf_get_val_u32, GGUF_TYPE_UINT32, false, kv(LLM_KV_ATTENTION_HEAD_COUNT));
+    GGUF_GET_KEY(ctx_gguf, hparams.n_head_kv, gguf_get_val_u32, GGUF_TYPE_UINT32, false,
+                 kv(LLM_KV_ATTENTION_HEAD_COUNT_KV));
+    GGUF_GET_KEY(ctx_gguf, hparams.n_layer, gguf_get_val_u32, GGUF_TYPE_UINT32, false, kv(LLM_KV_BLOCK_COUNT));
+    GGUF_GET_KEY(ctx_gguf, hparams.n_rot, gguf_get_val_u32, GGUF_TYPE_UINT32, false, kv(LLM_KV_ROPE_DIMENSION_COUNT));
 
+    GGUF_GET_KEY(ctx_gguf, hparams.rms_norm_eps, gguf_get_val_f32, GGUF_TYPE_FLOAT32, false,
+                 kv(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS));
+    GGUF_GET_KEY(ctx_gguf, hparams.freq_base, gguf_get_val_f32, GGUF_TYPE_FLOAT32, false, kv(LLM_KV_ROPE_FREQ_BASE));
+
+    // Get NeuralSpeed ftype
     uint32_t ftype = 1;
     GGUF_GET_KEY(ctx_gguf, ftype, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "ftype");
     hparams.ftype = (enum ne_ftype)ftype;
 
-    GGUF_GET_KEY(ctx_gguf, hparams.max_seq_len, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "max_seq_len");
-    GGUF_GET_KEY(ctx_gguf, hparams.alibi_bias_max, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "alibi_bias_max");
+    // Get specific model parameters
+    GGUF_GET_KEY(ctx_gguf, hparams.max_seq_len, gguf_get_val_u32, GGUF_TYPE_UINT32, false, kv(LLM_KV_CONTEXT_LENGTH));
+    GGUF_GET_KEY(ctx_gguf, hparams.alibi_bias_max, gguf_get_val_f32, GGUF_TYPE_FLOAT32, false,
+                 kv(LLM_KV_ATTENTION_MAX_ALIBI_BIAS));
     GGUF_GET_KEY(ctx_gguf, hparams.clip_qkv, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "clip_qkv");
     GGUF_GET_KEY(ctx_gguf, hparams.par_res, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "par_res");
 
@@ -889,13 +934,19 @@ struct gguf_loader {
 
     GGUF_GET_KEY(ctx_gguf, hparams.multi_query_group_num, gguf_get_val_u32, GGUF_TYPE_UINT32, false,
                  "multi_query_group_num");
-    GGUF_GET_KEY(ctx_gguf, hparams.ffn_hidden_size, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "ffn_hidden_size");
+    GGUF_GET_KEY(ctx_gguf, hparams.ffn_hidden_size, gguf_get_val_u32, GGUF_TYPE_UINT32, false,
+                 kv(LLM_KV_FEED_FORWARD_LENGTH));
     GGUF_GET_KEY(ctx_gguf, hparams.inner_hidden_size, gguf_get_val_u32, GGUF_TYPE_UINT32, false, "inner_hidden_size");
 
-    GGUF_GET_KEY(ctx_gguf, vocab.bos_token_id, gguf_get_val_i32, GGUF_TYPE_INT32, false, "bos_token_id");
-    GGUF_GET_KEY(ctx_gguf, vocab.eos_token_id, gguf_get_val_i32, GGUF_TYPE_INT32, false, "eos_token_id");
-    GGUF_GET_KEY(ctx_gguf, vocab.pad_token_id, gguf_get_val_i32, GGUF_TYPE_INT32, false, "pad_token_id");
-    GGUF_GET_KEY(ctx_gguf, vocab.sep_token_id, gguf_get_val_i32, GGUF_TYPE_INT32, false, "sep_token_id");
+    // Get special vocab ids
+    GGUF_GET_KEY(ctx_gguf, vocab.bos_token_id, gguf_get_val_u32, GGUF_TYPE_UINT32, false,
+                 "tokenizer.ggml.bos_token_id");
+    GGUF_GET_KEY(ctx_gguf, vocab.eos_token_id, gguf_get_val_u32, GGUF_TYPE_UINT32, false,
+                 "tokenizer.ggml.eos_token_id");
+    GGUF_GET_KEY(ctx_gguf, vocab.pad_token_id, gguf_get_val_u32, GGUF_TYPE_UINT32, false,
+                 "tokenizer.ggml.pad_token_id");
+    GGUF_GET_KEY(ctx_gguf, vocab.sep_token_id, gguf_get_val_u32, GGUF_TYPE_UINT32, false,
+                 "tokenizer.ggml.sep_token_id");
 
     // load vocab
     std::string tokens = "tokenizer.ggml.tokens";
@@ -911,7 +962,11 @@ struct gguf_loader {
       scores = (const float*)gguf_get_arr_data(ctx_gguf, score_idx);
     }
 
+    uint32_t default_n_vocab = 32000;
     const uint32_t n_vocab = gguf_get_arr_n(ctx_gguf, token_idx);
+    if ((hparams.n_vocab == default_n_vocab) && (hparams.n_vocab != n_vocab)) {
+      hparams.n_vocab = n_vocab;
+    }
 
     vocab.id_to_token.resize(hparams.n_vocab);
     for (uint32_t i = 0; i < n_vocab; i++) {
@@ -1043,6 +1098,7 @@ struct model_file_loader {
 
     file.read_raw(&hparams.rms_norm_eps, sizeof(float));
     file.read_raw(&hparams.freq_base, sizeof(float));
+    file.read_raw(&hparams.freq_scale, sizeof(float));
   }
 
   void read_ne_vocab() {
@@ -1162,6 +1218,7 @@ struct model_file_saver {
 
     file.write_raw(&hparams.rms_norm_eps, sizeof(float));
     file.write_raw(&hparams.freq_base, sizeof(float));
+    file.write_raw(&hparams.freq_scale, sizeof(float));
   }
   void write_vocab() {
     if (any_file_loader->file_version == MODEL_FILE_VERSION_NE) {
@@ -1258,16 +1315,19 @@ struct model_model_loader {
         if (it == tensors_map.name_to_idx.end()) {
           it = tensors_map.name_to_idx.find("model/wte");
           if (it == tensors_map.name_to_idx.end()) {
-            it = tensors_map.name_to_idx.find("model.embed_tokens.weight");  // baichuan13B
+            it = tensors_map.name_to_idx.find("token_embd.weight");  // llama-2-chat-hf
             if (it == tensors_map.name_to_idx.end()) {
-              it = tensors_map.name_to_idx.find("transformer.word_embeddings.weight");  // ChatGLM-1
+              it = tensors_map.name_to_idx.find("model.embed_tokens.weight");  // baichuan13B
               if (it == tensors_map.name_to_idx.end()) {
-                it = tensors_map.name_to_idx.find("transformer.embedding.word_embeddings.weight");  // ChatGLM-2
+                it = tensors_map.name_to_idx.find("transformer.word_embeddings.weight");  // ChatGLM-1
                 if (it == tensors_map.name_to_idx.end()) {
-                  it = tensors_map.name_to_idx.find("model.decoder.embed_tokens.weight");
-                  if (it != tensors_map.name_to_idx.end()) return 1;  // hacky solution for OPT loading
+                  it = tensors_map.name_to_idx.find("transformer.embedding.word_embeddings.weight");  // ChatGLM-2
                   if (it == tensors_map.name_to_idx.end()) {
-                    throw std::string("missing tok_embeddings.weight");
+                    it = tensors_map.name_to_idx.find("model.decoder.embed_tokens.weight");
+                    if (it != tensors_map.name_to_idx.end()) return 1;  // hacky solution for OPT loading
+                    if (it == tensors_map.name_to_idx.end()) {
+                      throw std::string("missing tok_embeddings.weight");
+                    }
                   }
                 }
               }
@@ -1294,6 +1354,15 @@ struct model_model_loader {
     }
   }
 
+  bool verify_tensor(const std::string& name) {
+    auto it = tensors_map.name_to_idx.find(name);
+    if (it == tensors_map.name_to_idx.end()) {
+      return false;
+    }
+
+    return true;
+  }
+
   struct ne_tensor* get_tensor(const std::string& name, const std::vector<uint32_t>& ne, ne_backend backend) {
     auto it = tensors_map.name_to_idx.find(name);
     if (it == tensors_map.name_to_idx.end()) {
@@ -1301,11 +1370,17 @@ struct model_model_loader {
     }
     model_load_tensor& lt = tensors_map.tensors.at(it->second);
 #ifdef NS_TP_MODEL
-    if (lt.enable_tp && (lt.split_type == TP_1D_ROW || lt.split_type == TP_1D_COLUMN)) {
+    if (lt.enable_tp && (lt.split_type == TP_1D_ROW || lt.split_type == TP_1D_COLUMN ||
+                         lt.split_type == TP_1D_QKV_ROW || lt.split_type == TP_1D_QKV_COLUMN)) {
       // check the split dim
-      size_t split_dim_size =
-          lt.ne.size() == 1 ? lt.ne.at(0) : (lt.split_type == TP_1D_ROW ? lt.ne.at(1) : lt.ne.at(0));
-      size_t origin_dim_size = ne.size() == 1 ? ne.at(0) : (lt.split_type == TP_1D_ROW ? ne.at(1) : ne.at(0));
+      size_t split_dim_size, origin_dim_size;
+      if (lt.split_type == TP_1D_ROW || lt.split_type == TP_1D_QKV_ROW) {
+        split_dim_size = lt.ne.size() == 1 ? lt.ne.at(0) : lt.ne.at(1);
+        origin_dim_size = ne.size() == 1 ? ne.at(0) : ne.at(1);
+      } else {
+        split_dim_size = lt.ne.at(0);
+        origin_dim_size = ne.at(0);
+      }
       MODEL_ASSERT(split_dim_size == origin_dim_size / lt.world_size);
       return get_tensor_for(lt, backend);
     }
@@ -1387,15 +1462,29 @@ struct model_model_loader {
   }
 
   void bestla_split_weight(void** src, void** dst, size_t src_n, size_t src_k, size_t dst_n, size_t dst_k,
-                           size_t n_rank, size_t k_rank) {
+                           size_t n_rank, size_t k_rank, bool qkv_fusion = false) {
     auto src_fp32 = (float*)malloc(src_n * src_k * sizeof(float));
     if (src_fp32 == nullptr) {
       assert(0);
     }
     bestla_unpackweight_fp32(*src, src_n, src_k, src_fp32, src_n);
     // layout will be K * N in the buffer
-    auto dst_fp32 = src_fp32 + k_rank * dst_k * src_n + n_rank * dst_n;
-    bestla_packweight_copyattr(dst_fp32, *dst, dst_n, dst_k, src_n, *src);
+    float* dst_fp32;
+    if (qkv_fusion) {
+      dst_fp32 = (float*)malloc(dst_n * dst_k * sizeof(float));
+      for (int i = 0; i < src_k; ++i) {
+        for (int j = 0; j < 3; ++j) {
+          float* dst_off = dst_fp32 + dst_n * i + j * dst_n / 3;
+          float* src_off = src_fp32 + src_n * i + j * src_n / 3 + n_rank * dst_n / 3;
+          memcpy(dst_off, src_off, dst_n * sizeof(float) / 3);
+        }
+      }
+      bestla_packweight_copyattr(dst_fp32, *dst, dst_n, dst_k, dst_n, *src);
+      free(dst_fp32);
+    } else {
+      dst_fp32 = src_fp32 + k_rank * dst_k * src_n + n_rank * dst_n;
+      bestla_packweight_copyattr(dst_fp32, *dst, dst_n, dst_k, src_n, *src);
+    }
     free(src_fp32);
   }
   void load_data_for(model_load_tensor& lt) {
@@ -1438,7 +1527,7 @@ struct model_model_loader {
       MODEL_ASSERT(out_offset == lt.size);
     }
 #ifdef NS_TP_MODEL
-    else if (lt.split_type == TP_1D_ROW) {
+    else if (lt.split_type == TP_1D_ROW || lt.split_type == TP_1D_QKV_ROW) {
       model_load_tensor_shard& shard = lt.shards.at(0);
       model_buffer tmp_buf;
       model_file& file = file_loaders.at(shard.file_idx)->file;
@@ -1450,14 +1539,22 @@ struct model_model_loader {
         void* dst_data = (void*)lt.data;
         void* src_data = (void*)(tmp_buf.addr);
         bestla_split_weight(&src_data, &dst_data, lt.world_size * num_rows, lt.ne.at(0), num_rows, lt.ne.at(0), lt.rank,
-                            0);
+                            0, lt.split_type == TP_1D_QKV_ROW);
       } else {
         // only copy part of weight form the tmp_buf of origin file
         tmp_buf.resize(lt.size * lt.world_size);
         file.read_raw(tmp_buf.addr, lt.size * lt.world_size);
-        memcpy(lt.data, tmp_buf.addr + lt.rank * lt.size, lt.size);
+        if (lt.split_type == TP_1D_QKV_ROW) {
+          for (int j = 0; j < 3; ++j) {
+            auto dst_off = lt.data + j * lt.size / 3;
+            auto src_off = tmp_buf.addr + (lt.rank + j * lt.world_size) * lt.size / 3;
+            memcpy(dst_off, src_off, lt.size / 3);
+          }
+        } else {
+          memcpy(lt.data, tmp_buf.addr + lt.rank * lt.size, lt.size);
+        }
       }
-    } else if (lt.split_type == TP_1D_COLUMN) {
+    } else if (lt.split_type == TP_1D_COLUMN || lt.split_type == TP_1D_QKV_COLUMN) {
       if (lt.size == 0) {
         return;
       }
@@ -1471,18 +1568,30 @@ struct model_model_loader {
         file.read_raw(tmp_buf.addr, shard.size);
         void* dst_data = (void*)lt.data;
         void* src_data = (void*)(tmp_buf.addr);
+        // TODO support QKV COLUMN in bestla
         bestla_split_weight(&src_data, &dst_data, num_rows, lt.world_size * lt.ne.at(0), num_rows, lt.ne.at(0), 0,
                             lt.rank);
       } else {
         tmp_buf.resize(lt.size * lt.world_size);
         file.read_raw(tmp_buf.addr, lt.size * lt.world_size);
         size_t offset = 0;
-        // different data type may have differnet per_row_size
+        // different data type may have different per_row_size
         size_t per_row_size = lt.size / num_rows;
-        for (size_t i = 0; i < num_rows; ++i) {
-          memcpy(lt.data + offset, tmp_buf.addr + lt.rank * per_row_size + i * lt.world_size * per_row_size,
-                 per_row_size);
-          offset += per_row_size;
+        if (lt.split_type == TP_1D_QKV_COLUMN) {
+          for (size_t i = 0; i < num_rows; ++i) {
+            for (int j = 0; j < 3; ++j) {
+              auto dst_off = lt.data + i * per_row_size + j * per_row_size / 3;
+              auto src_off = tmp_buf.addr + (lt.rank / 3 + j * lt.world_size / 3 + i * lt.world_size) * per_row_size;
+              memcpy(dst_off, src_off, per_row_size / 3);
+            }
+            offset += per_row_size;
+          }
+        } else {
+          for (size_t i = 0; i < num_rows; ++i) {
+            memcpy(lt.data + offset, tmp_buf.addr + lt.rank * per_row_size + i * lt.world_size * per_row_size,
+                   per_row_size);
+            offset += per_row_size;
+          }
         }
         MODEL_ASSERT(offset == lt.size);
       }

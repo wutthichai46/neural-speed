@@ -101,7 +101,7 @@ def bytes_to_unicode():
     The reversible bpe codes work on unicode strings.
     This means you need a large # of unicode characters in your vocab if you want to avoid UNKs.
     When you're at something like a 10B token dataset you end up needing around 5K for decent coverage.
-    This is a signficant percentage of your normal, say, 32K bpe vocab.
+    This is a significant percentage of your normal, say, 32K bpe vocab.
     To avoid that, we want lookup tables between utf-8 bytes and unicode strings.
     And avoids mapping to whitespace/control characters the bpe code barfs on.
     """
@@ -170,7 +170,7 @@ f.write(struct.pack("i", 0))  # do_layer_norm_before (for opt)
 f.write(struct.pack("i", 0))
 f.write(struct.pack("i", 0))
 f.write(struct.pack("i", 0))
-fout.write(struct.pack("f", 1e-6))  # rms norm eps
+f.write(struct.pack("f", 1e-6))  # rms norm eps
 
 f.write(struct.pack("i", tokenizer.bos_token_id if tokenizer.bos_token_id is not None else 1))
 f.write(struct.pack("i", tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 2))

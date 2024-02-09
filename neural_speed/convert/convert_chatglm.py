@@ -17,9 +17,9 @@ import json
 import numpy as np
 from pathlib import Path
 import argparse
-from typing import (IO, TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple,
-                    TypeVar, Union)
-from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+from typing import (IO, TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, TypeVar,
+                    Union)
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from sentencepiece import SentencePieceProcessor  # type: ignore
 import gguf
 
@@ -31,14 +31,11 @@ def bytes_to_unicode():
     The reversible bpe codes work on unicode strings.
     This means you need a large # of unicode characters in your vocab if you want to avoid UNKs.
     When you're at something like a 10B token dataset you end up needing around 5K for decent coverage.
-    This is a signficant percentage of your normal, say, 32K bpe vocab.
+    This is a significant percentage of your normal, say, 32K bpe vocab.
     To avoid that, we want lookup tables between utf-8 bytes and unicode strings.
     And avoids mapping to whitespace/control characters the bpe code barfs on.
     """
-    bs = list(range(ord("!"),
-                    ord("~") + 1)) + list(range(ord("¡"),
-                                                ord("¬") + 1)) + list(range(ord("®"),
-                                                                            ord("ÿ") + 1))
+    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
     cs = bs[:]
     n = 0
     for b in range(2**8):
@@ -155,24 +152,28 @@ def chatglm2_convert_gguf(model, tokenizer, dir_model, fname_out, ftype, hparams
         print(name, list_vars[name].shape, list_vars[name].dtype)
 
     print(hparams)
-    fout = open(fname_out, "wb")
 
     gguf_file = fname_out + '.gguf'
     gguf_writer = gguf.GGUFWriter(gguf_file, "chatglm2")
 
+    arch = "chatglm2."
     gguf_writer.add_uint32('magic', 0x67676d66)
     gguf_writer.add_uint32('version', 1)
     gguf_writer.add_uint32('n_vocab', hparams["padded_vocab_size"])
-    gguf_writer.add_uint32('n_embd', hparams["hidden_size"])
-    gguf_writer.add_uint32('n_mult', 0)
-    gguf_writer.add_uint32('n_head', hparams["num_attention_heads"])
-    gguf_writer.add_uint32('n_head_kv', 0)
+    gguf_writer.add_embedding_length(hparams["hidden_size"])
 
-    gguf_writer.add_uint32('n_layer', hparams["num_layers"])
-    gguf_writer.add_uint32('n_rot', 0)
+    gguf_writer.add_uint32('n_mult', 0)
+    gguf_writer.add_head_count(hparams["num_attention_heads"])
+    gguf_writer.add_head_count_kv(0)
+    gguf_writer.add_block_count(hparams["num_layers"])
+
+    gguf_writer.add_rope_dimension_count(0)
     gguf_writer.add_uint32('ftype', ftype)
-    gguf_writer.add_uint32('max_seq_len', hparams["seq_length"])
-    gguf_writer.add_uint32('alibi_bias_max', 0)
+
+    gguf_writer.add_context_length(hparams["seq_length"])
+
+    gguf_writer.add_max_alibi_bias(0)
+
     gguf_writer.add_uint32('clip_qkv', 0)
     gguf_writer.add_uint32('par_res', 0)
 
@@ -180,13 +181,15 @@ def chatglm2_convert_gguf(model, tokenizer, dir_model, fname_out, ftype, hparams
     gguf_writer.add_uint32('do_layer_norm_before', 0)
 
     gguf_writer.add_uint32('multi_query_group_num', hparams["multi_query_group_num"])
-    gguf_writer.add_uint32('ffn_hidden_size', hparams["ffn_hidden_size"])
+
+    gguf_writer.add_feed_forward_length(hparams["ffn_hidden_size"])
+
     gguf_writer.add_uint32('inner_hidden_size', 0)
 
-    gguf_writer.add_int32('bos_token_id', tokenizer.bos_token_id if tokenizer.bos_token_id is not None else -1)
-    gguf_writer.add_int32('eos_token_id', tokenizer.eos_token_id if tokenizer.eos_token_id is not None else -1)
-    gguf_writer.add_int32('pad_token_id', tokenizer.pad_token_id if tokenizer.pad_token_id is not None else -1)
-    gguf_writer.add_int32('sep_token_id', tokenizer.sep_token_id if tokenizer.sep_token_id is not None else -1)
+    gguf_writer.add_bos_token_id(tokenizer.bos_token_id if tokenizer.bos_token_id is not None else 0)
+    gguf_writer.add_eos_token_id(tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0)
+    gguf_writer.add_pad_token_id(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+    gguf_writer.add_sep_token_id(tokenizer.sep_token_id if tokenizer.sep_token_id is not None else 0)
 
     def write_vocab_gguf(dir_model):
         print("gguf: get tokenizer metadata")
@@ -358,13 +361,16 @@ def chatglm2_convert(model, tokenizer, dir_model, fname_out, ftype, hparams):
     fout.write(struct.pack("i", 0))
     fout.write(struct.pack("f", hparams.get("layernorm_epsilon", 1e-6)))  # rms norm eps
     fout.write(struct.pack("f", 10000.0))  # freq_base
+    fout.write(struct.pack("f", 1.0))  # rope_factor
 
     fout.write(struct.pack("i", tokenizer.bos_token_id if tokenizer.bos_token_id is not None else 1))
     fout.write(struct.pack("i", tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 2))
     fout.write(struct.pack("i", tokenizer.pad_token_id if tokenizer.pad_token_id is not None else -1))
     fout.write(struct.pack("i", tokenizer.sep_token_id if tokenizer.sep_token_id is not None else -1))
 
-    vocab = load_vocab_for_glm2(Path(dir_model))
+    tokenizer_path = Path(tokenizer.vocab_file).parent
+    vocab = load_vocab_for_glm2(Path(tokenizer_path))
+
     counter = 0
     for text, score in vocab.all_tokens():
         fout.write(struct.pack("i", len(text)))
@@ -453,13 +459,15 @@ def chatglm1_convert(model, tokenizer, dir_model, fname_out, ftype, hparams):
     fout.write(struct.pack("i", hparams["inner_hidden_size"]))
     fout.write(struct.pack("f", hparams.get("rms_norm_eps", 1e-6)))  # rms norm eps
     fout.write(struct.pack("f", 10000.0))  # freq_base
+    fout.write(struct.pack("f", 1.0))  # rope_factor
 
     fout.write(struct.pack("i", tokenizer.bos_token_id if tokenizer.bos_token_id is not None else -1))
     fout.write(struct.pack("i", tokenizer.eos_token_id if tokenizer.eos_token_id is not None else -1))
     fout.write(struct.pack("i", tokenizer.pad_token_id if tokenizer.pad_token_id is not None else -1))
     fout.write(struct.pack("i", tokenizer.sep_token_id if tokenizer.sep_token_id is not None else -1))
 
-    vocab = load_vocab_for_glm1(Path(dir_model))
+    tokenizer_path = Path(tokenizer.vocab_file).parent
+    vocab = load_vocab_for_glm1(Path(tokenizer_path))
     counter = 0
     for text, score in vocab.all_tokens():
         fout.write(struct.pack("i", len(text)))
@@ -529,9 +537,6 @@ def main(args_in: Optional[List[str]] = None) -> None:
     dir_model = args.model.as_posix()
     fname_out = args.outfile.as_posix()
 
-    with open(dir_model + '/config.json', "r", encoding="utf-8") as f:
-        hparams = json.load(f)
-
     # possible data types
     #   ftype == 0 -> float32
     #   ftype == 1 -> float16
@@ -539,8 +544,11 @@ def main(args_in: Optional[List[str]] = None) -> None:
     if args.outtype == "f16":
         ftype = 1
 
+    config = AutoConfig.from_pretrained(dir_model, trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(dir_model, trust_remote_code=True)
     model = AutoModel.from_pretrained(dir_model, low_cpu_mem_usage=True, trust_remote_code=True)
+
+    hparams = config.to_dict()
 
     if hasattr(model.config, "multi_query_attention"):
         if args.format == "GGUF":

@@ -17,11 +17,15 @@
 #include <vector>
 #include "bestla.h"
 #include "xbyak/xbyak_util.h"
+#include "bestla_utils.h"
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <sched.h>
 #endif
+
+#define FIXED_CACHE_SIZE ((1 << 20) - (128 << 10))
+#define FIXED_CACHE 1
 
 namespace bestla {
 
@@ -244,6 +248,9 @@ class CpuDevice {
     ADD_FLAG(AVX512_BF16);
     ADD_FLAG(AVX512_FP16);
     numcores = _cpu.getNumCores(Xbyak::util::IntelCpuTopologyLevel::CoreLevel);
+    if (mHasAMX_BF16 || mHasAMX_INT8) {
+      utils::request_perm_xtile_data();
+    }
     static bool p = false;
     {
       uint32_t tmp[4];
@@ -303,10 +310,22 @@ class CpuDevice {
           for (auto& i : SMT_core) printf("%d,", i);
           printf("\n");
         }
-        E_L1Cache = L1[E_core[0]];
-        E_L2Cache = L2[E_core[0]] / 4;
-        L1Cache = E_L1Cache > L1[P_core[0]] / 2 ? L1[P_core[0]] / 2 : E_L1Cache;
-        L2Cache = E_L2Cache > L2[P_core[0]] / 2 ? L2[P_core[0]] / 2 : E_L2Cache;
+        if (!E_core.empty() && !P_core.empty()) {
+          E_L1Cache = L1[E_core[0]];
+          E_L2Cache = L2[E_core[0]] / 4;
+          uint32_t scale = SMT_core.empty() ? 1 : 2;
+          L1Cache = E_L1Cache > L1[P_core[0]] / scale ? L1[P_core[0]] / scale : E_L1Cache;
+          L2Cache = E_L2Cache > L2[P_core[0]] / scale ? L2[P_core[0]] / scale : E_L2Cache;
+        } else if (!P_core.empty()) {
+          uint32_t scale = SMT_core.empty() ? 1 : 2;
+          L1Cache = L1[P_core[0]] / scale;
+          L2Cache = L2[P_core[0]] / scale;
+          mHybrid = false;
+        } else {
+          L1Cache = L1[E_core[0]];
+          L2Cache = L2[E_core[0]] / 4;
+          mHybrid = false;
+        }
       }
       numcores = P_core.size() + E_core.size();
       numthreads = P_core.size() * 2 + E_core.size();
@@ -315,6 +334,10 @@ class CpuDevice {
       L2Cache = _cpu.getDataCacheSize(1);
       numthreads = numcores;
     }
+#if FIXED_CACHE
+    L2Cache = L2Cache >= FIXED_CACHE_SIZE ? FIXED_CACHE_SIZE : L2Cache;
+    E_L2Cache = E_L2Cache >= FIXED_CACHE_SIZE ? FIXED_CACHE_SIZE : E_L2Cache;
+#endif
   }
 
   static CpuDevice* getInstance() {

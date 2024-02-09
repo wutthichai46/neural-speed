@@ -61,6 +61,8 @@
 #define MODEL_SESSION_MAGIC MODEL_FILE_MAGIC_GGSN
 #define MODEL_SESSION_VERSION 1
 
+#define MODEL_MAX_REQUEST_NUM 8
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -78,7 +80,9 @@ enum model_archs {
   MODEL_BAICHUAN,
   MODEL_CHATGLM2,
   MODEL_CHATGLM,
-  MODEL_QWEN
+  MODEL_QWEN,
+  MODEL_PHI,
+  MODEL_WHISPER
 };
 
 static const size_t MB = 1024 * 1024;
@@ -126,7 +130,8 @@ struct model_hparams {
   uint32_t word_embed_proj_dim = 0;   // for opt
   bool do_layer_norm_before = false;  // for opt
   float rms_norm_eps = 1e-6f;         // rms norm epsilon
-  float freq_base = 10000.0f;
+  float freq_base = 10000.0f;         // rope theta
+  float freq_scale = 1.0f;            // rope scale factor
 
   // ChatGLM-2
   int32_t multi_query_group_num = 0;
@@ -279,7 +284,7 @@ struct model_context {
   model_struct model;
   model_vocab vocab;
   // maximum num of bearable requests in current env
-  int max_request_bs = 32;  // TODO
+  int max_request_num = MODEL_MAX_REQUEST_NUM;
   // num of current execution prompts
   int request_running_bs = 1;
   // length of current execution tokens list
@@ -291,11 +296,14 @@ struct model_context {
   bool support_bestla_kv = false;  // whether the model graph supports bestla-kvcache
   int beam_size = 1;
   int kv_n_ctx_block = 1;
-  generation_config generation_conf;
+  bool cont_batching = false;
+  generation_config generation_conf;  // global generation config
   std::shared_ptr<beam_search_kv_cache_reorder> bs_kv_reorder;
   std::vector<std::vector<std::string>> tensors_name;
 
   size_t mem_per_token = 0;
+
+  float model_scratch_enlarge_scale = 1.0f;  // model memory scratch enlarge scale
 
   // decode output (3-dimensional array: [batch_size] [n_tokens] [n_vocab])
   std::vector<float> logits;
@@ -390,6 +398,7 @@ struct model_input {
   int padding_side = 0;
   // padding length
   uint32_t n_padding = 0;
+  generation_config gen_conf;
 };
 
 struct model_context_params {
@@ -410,6 +419,12 @@ struct model_context_params {
   bool beam_search;     // beam search or not
   int beam_size;        // number of beams for beam search
   bool shift_roped_k;   // whether to store non-RoPEd K cache
+  bool cont_batching;   // whether to use continuous batching
+  int max_request_num;  // maximum num of bearable requests in current env
+  // global generation config
+  generation_config gen_conf;
+  // model memory scratch enlarge scale
+  float model_scratch_enlarge_scale;
 
   // called with a progress value between 0 and 1, pass nullptr to disable
   model_progress_callback progress_callback;
@@ -451,7 +466,7 @@ class model_name_to_arch {
       {"dolly", MODEL_GPTNEOX},   {"polyglot", MODEL_GPTNEOX},  {"starcoder", MODEL_STARCODER},
       {"falcon", MODEL_FALCON},   {"bloom", MODEL_BLOOM},       {"chatglm2", MODEL_CHATGLM2},
       {"chatglm", MODEL_CHATGLM}, {"baichuan", MODEL_BAICHUAN}, {"mistral", MODEL_LLAMA},
-      {"qwen", MODEL_QWEN}};
+      {"qwen", MODEL_QWEN},       {"phi", MODEL_PHI},           {"whisper", MODEL_WHISPER}};
 };
 
 #ifdef __cplusplus
